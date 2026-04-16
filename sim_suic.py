@@ -26,18 +26,18 @@ st.set_page_config(
 # M2 = Satisfação com a vida
 # Y = Ideação suicida
 
-BETA_XY = 0.243     # X -> Y (efeito direto)
-BETA_XM1 = -0.324   # X -> M1
-BETA_M1M2 = 0.527   # M1 -> M2 (nível médio de pertença)
-BETA_M2Y = -0.170   # M2 -> Y
+BETA_XY = 0.243
+BETA_XM1 = -0.324
+BETA_M1M2 = 0.527
+BETA_M2Y = -0.170
 
 # Efeitos indiretos reportados por nível de pertença
 IND_BAIXA = 0.016
 IND_MEDIA = 0.020
 IND_ALTA = 0.024
 
-MOD_BAIXA = IND_BAIXA / IND_MEDIA   # 0.80
-MOD_ALTA = IND_ALTA / IND_MEDIA     # 1.20
+MOD_BAIXA = IND_BAIXA / IND_MEDIA
+MOD_ALTA = IND_ALTA / IND_MEDIA
 
 # Médias populacionais
 V_POP = 1.51
@@ -45,7 +45,7 @@ M1_POP = 3.56
 M2_POP = 3.38
 Y_POP = 1.69
 
-# Colunas esperadas no CSV
+# Colunas mínimas esperadas no CSV
 COLUNAS_MINIMAS = [
     "percepcao_violencia",
     "acolhimento",
@@ -54,12 +54,15 @@ COLUNAS_MINIMAS = [
     "ideacao_suicida",
 ]
 
-COLUNAS_FILTRO_OPCIONAIS = [
-    "sexo",
-    "cor_da_pele",
-    "orientação_sexual",
-    "renda",
-]
+# Filtros opcionais exibidos se a coluna existir
+FILTROS_CONFIG = {
+    "sexo": "Sexo",
+    "cor_da_pele": "Cor da pele",
+    "orientação_sexual": "Orientação sexual",
+    "renda": "Renda",
+    "cidade": "Cidade",
+    "série": "Série",
+}
 
 
 # =========================================================
@@ -174,12 +177,12 @@ def carregar_dados(caminho_csv: str) -> pd.DataFrame:
 
 def classificar_risco(y: float) -> str:
     if y < 2.0:
-        return "Baixo"
+        return "Baixa intensidade estimada"
     elif y < 3.0:
-        return "Moderado"
+        return "Intensidade moderada estimada"
     elif y < 4.0:
-        return "Elevado"
-    return "Muito elevado"
+        return "Intensidade elevada estimada"
+    return "Intensidade muito elevada estimada"
 
 
 def calcular_resultado(
@@ -196,11 +199,6 @@ def calcular_resultado(
     - O caminho indireto pode ser ativado/desativado.
     - M1 atua sobre M2 se usar_m1=True.
     - M2 atua sobre Y se usar_m2=True.
-
-    Nós:
-    1) y_basal         = efeito direto de X + nível basal de Y
-    2) y_pos_mediacao  = aplica o caminho X -> M1 -> M2 -> Y, via M1 informado
-    3) y_final         = aplica M2 informado pelo usuário
     """
     pertenca_alta = interceptos.pertenca_alta
     beta_eff = beta_m1m2_efetivo(pertenca_alta)
@@ -208,7 +206,7 @@ def calcular_resultado(
     # Nó 1: X sempre presente, sem proteção mediada
     y_basal = interceptos.ic_y + (BETA_XY * x) + (BETA_M2Y * interceptos.ic_m2)
 
-    # Caminho intermediário: M2 previsto a partir de M1
+    # M2 previsto a partir de M1
     if usar_m1:
         m2_previsto = interceptos.ic_m2 + beta_eff * m1
     else:
@@ -232,7 +230,6 @@ def calcular_resultado(
     reducao_mediada = y_basal - y_pos_mediacao
     ajuste_m2 = y_pos_mediacao - y_final_raw
 
-    # efeito indireto estrutural aproximado de X via M1->M2->Y
     efeito_indireto_x = BETA_M2Y * beta_eff * BETA_XM1 * x if (usar_m1 and usar_m2) else 0.0
     efeito_direto_x = BETA_XY * x
     efeito_total_x = efeito_direto_x + efeito_indireto_x
@@ -305,7 +302,7 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
         hoverinfo="skip"
     ))
 
-    # Queda / mudança 1
+    # Mudança 1
     if abs(resultado.reducao_mediada) > 0.005:
         cor1 = "rgba(220,50,50,0.85)" if resultado.reducao_mediada > 0 else "rgba(50,90,220,0.85)"
         fig.add_trace(go.Scatter(
@@ -328,7 +325,7 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
             borderwidth=1,
         )
 
-    # Queda / mudança 2
+    # Mudança 2
     if abs(resultado.ajuste_m2) > 0.005:
         cor2 = "rgba(220,50,50,0.85)" if resultado.ajuste_m2 > 0 else "rgba(50,90,220,0.85)"
         fig.add_trace(go.Scatter(
@@ -351,7 +348,6 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
             borderwidth=1,
         )
 
-    # Pontos
     pontos = [
         (x_labels[0], y1, "#1f77b4", "#0e4e7d", "Base por X"),
         (x_labels[1], y2, "#ff7f0e", "#cc6600", "Após mediação"),
@@ -370,14 +366,15 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
             name=nome
         ))
 
-    subtitulo_mediacao = []
-    subtitulo_mediacao.append("X sempre ativo")
-    subtitulo_mediacao.append(f"M1 {'ativo' if usar_m1 else 'desligado'}")
-    subtitulo_mediacao.append(f"M2 {'ativo' if usar_m2 else 'desligado'}")
+    subtitulo = [
+        "X sempre ativo",
+        f"M1 {'ativo' if usar_m1 else 'desligado'}",
+        f"M2 {'ativo' if usar_m2 else 'desligado'}"
+    ]
 
     fig.update_layout(
         title=dict(
-            text="Dinâmica Estrutural: Pressão Basal, Mediação e Escore Final<br><sup>" + " | ".join(subtitulo_mediacao) + "</sup>",
+            text="Dinâmica Estrutural: Pressão Basal, Mediação e Escore Final<br><sup>" + " | ".join(subtitulo) + "</sup>",
             font=dict(size=18)
         ),
         yaxis=dict(
@@ -459,6 +456,7 @@ def renderizar_diagrama_estrutural() -> go.Figure:
         (0.50, 0.73, "β X→Y = 0.243", "#1f77b4"),
         (0.44, 0.30, "mod = 0.80–1.20", "#ff7f0e"),
     ]
+
     for x, y, txt, cor in anotacoes:
         fig.add_annotation(
             x=x,
@@ -488,34 +486,87 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
     c3.metric("Efeito total estrutural de X", f"{r.efeito_total_x:+.3f}")
 
     st.markdown("#### Interpretação resumida")
+
     texto = []
+    reducao_mediacao = r.y_basal - r.y_pos_mediacao
+    ajuste_adicional_m2 = r.y_pos_mediacao - r.y_final
 
     texto.append(
-        f"O escore basal estimado de ideação foi **{r.y_basal:.3f}**, representando a pressão esperada quando **X entra diretamente no modelo**."
+        f"O escore basal estimado de ideação foi **{r.y_basal:.3f}**, "
+        f"representando a pressão esperada quando **X entra diretamente no modelo**."
     )
 
     if usar_m1 and usar_m2:
-        texto.append(
-            f"A ativação do caminho mediado reduziu/alterou esse valor para **{r.y_pos_mediacao:.3f}**, com variação de **{r.reducao_mediada:+.3f}**."
-        )
-        texto.append(
-            f"O uso do valor informado de M2 levou o escore final a **{r.y_final:.3f}**, com ajuste adicional de **{r.ajuste_m2:+.3f}**."
-        )
+        if abs(reducao_mediacao) < 0.001:
+            texto.append(
+                f"A ativação do caminho mediado manteve o escore em **{r.y_pos_mediacao:.3f}**, "
+                f"sem alteração relevante em relação ao nível basal."
+            )
+        elif reducao_mediacao > 0:
+            texto.append(
+                f"A ativação do caminho mediado reduziu esse valor para **{r.y_pos_mediacao:.3f}**, "
+                f"com **redução de {reducao_mediacao:.3f} ponto(s)**."
+            )
+        else:
+            texto.append(
+                f"A ativação do caminho mediado elevou esse valor para **{r.y_pos_mediacao:.3f}**, "
+                f"com **aumento de {abs(reducao_mediacao):.3f} ponto(s)**."
+            )
+
+        if abs(ajuste_adicional_m2) < 0.001:
+            texto.append(
+                f"O uso do valor informado de M2 manteve o escore final em **{r.y_final:.3f}**, "
+                f"sem ajuste adicional relevante em relação ao valor já produzido pela mediação."
+            )
+        elif ajuste_adicional_m2 > 0:
+            texto.append(
+                f"O uso do valor informado de M2 reduziu adicionalmente o escore para **{r.y_final:.3f}**, "
+                f"com **redução adicional de {ajuste_adicional_m2:.3f} ponto(s)**."
+            )
+        else:
+            texto.append(
+                f"O uso do valor informado de M2 elevou adicionalmente o escore para **{r.y_final:.3f}**, "
+                f"com **aumento adicional de {abs(ajuste_adicional_m2):.3f} ponto(s)**."
+            )
+
     elif usar_m1 and not usar_m2:
-        texto.append(
-            "O caminho M1→M2 foi mantido apenas como referência estrutural, mas o efeito de M2 sobre Y foi desligado."
-        )
+        if abs(reducao_mediacao) < 0.001:
+            texto.append(
+                "O caminho X→M1→M2 foi mantido como referência estrutural, mas sem efeito final sobre Y nesta configuração."
+            )
+        else:
+            texto.append(
+                "O caminho X→M1→M2 foi mantido como referência estrutural, "
+                "mas o efeito de M2 sobre Y foi desligado; por isso, a mediação não se completa no desfecho."
+            )
+
     elif not usar_m1 and usar_m2:
-        texto.append(
-            "O efeito de M2 sobre Y foi mantido, mas o elo M1→M2 foi desligado. Assim, não há mediação serial completa."
-        )
+        if abs(ajuste_adicional_m2) < 0.001:
+            texto.append(
+                f"O efeito de M2 sobre Y foi mantido, mas o elo X→M1→M2 foi desligado. "
+                f"Nesta configuração, o escore final permaneceu em **{r.y_final:.3f}**, sem ajuste adicional relevante."
+            )
+        elif ajuste_adicional_m2 > 0:
+            texto.append(
+                f"O efeito de M2 sobre Y foi mantido, mas o elo X→M1→M2 foi desligado. "
+                f"Ainda assim, M2 produziu **redução adicional de {ajuste_adicional_m2:.3f} ponto(s)**, "
+                f"levando o escore final a **{r.y_final:.3f}**."
+            )
+        else:
+            texto.append(
+                f"O efeito de M2 sobre Y foi mantido, mas o elo X→M1→M2 foi desligado. "
+                f"Nesta configuração, M2 produziu **aumento adicional de {abs(ajuste_adicional_m2):.3f} ponto(s)**, "
+                f"levando o escore final a **{r.y_final:.3f}**."
+            )
+
     else:
         texto.append(
-            "Os mediadores foram desligados, de modo que o escore final coincide com a pressão basal por X."
+            f"Os caminhos mediadores foram desligados, de modo que o escore final permaneceu em **{r.y_final:.3f}**, "
+            f"coincidindo com a pressão basal associada a X."
         )
 
     texto.append(
-        f"A classificação heurística do escore final é **{classificar_risco(r.y_final)}**."
+        f"A classificação heurística do escore final do risco é **{classificar_risco(r.y_final)}**."
     )
 
     st.info(" ".join(texto))
@@ -549,14 +600,14 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
 
 
 # =========================================================
-# INTERFACE
+# INTERFACE PRINCIPAL
 # =========================================================
 
 def main():
-    st.title("📊 Simulador Estrutural de Risco de Ideação")
+    st.title("📊 Simulador do Risco de Ideação Suicida")
     st.caption("Modelo serial moderado: X → M1 → M2 → Y, com X sempre presente.")
+    st.caption("Desenvolvido no  OPPES / PPGPSI/ UFS")
 
-    # Estado inicial
     if "mem_x" not in st.session_state:
         st.session_state.mem_x = int(round(V_POP))
         st.session_state.mem_m1 = int(round(M1_POP))
@@ -608,12 +659,12 @@ def main():
         st.sidebar.subheader("🗂️ Filtros demográficos")
 
         df_f = df.copy()
-
         filtros = {}
-        for col in COLUNAS_FILTRO_OPCIONAIS:
+
+        for col, rotulo in FILTROS_CONFIG.items():
             if col in df.columns:
                 opcoes = ["Todos"] + sorted(df[col].dropna().astype(str).unique().tolist())
-                escolha = st.sidebar.selectbox(col.replace("_", " ").title(), opcoes, key=f"filtro_{col}")
+                escolha = st.sidebar.selectbox(rotulo, opcoes, key=f"filtro_{col}")
                 filtros[col] = escolha
 
         for col, escolha in filtros.items():
@@ -671,10 +722,28 @@ def main():
             )
         else:
             st.subheader("Simulação em escala Likert")
-            x = st.slider("Violência percebida (X)", 1, 5, int(x), key="slider_x")
-            m1 = st.slider("Acolhimento (M1)", 1, 5, int(m1), key="slider_m1")
-            m2 = st.slider("Satisfação com a vida (M2)", 1, 5, int(m2), key="slider_m2")
-            pertenca = st.radio("Pertença grupal", ["Baixa", "Alta"], key="radio_pert")
+            if "slider_x" not in st.session_state:
+                st.session_state.slider_x = int(x)
+
+            if "slider_m1" not in st.session_state:
+                st.session_state.slider_m1 = int(m1)
+
+            if "slider_m2" not in st.session_state:
+                st.session_state.slider_m2 = int(m2)
+
+            if "radio_pert" not in st.session_state:
+                st.session_state.radio_pert = "Alta" if inter.pertenca_alta else "Baixa"
+
+            st.slider("Violência percebida (X)", 1, 5, key="slider_x")
+            st.slider("Acolhimento (M1)", 1, 5, key="slider_m1")
+            st.slider("Satisfação com a vida (M2)", 1, 5, key="slider_m2")
+            st.radio("Pertença grupal", ["Baixa", "Alta"], key="radio_pert")
+
+            x = st.session_state.slider_x
+            m1 = st.session_state.slider_m1
+            m2 = st.session_state.slider_m2
+            pertenca = st.session_state.radio_pert
+
             inter = interceptos_populacionais(pertenca == "Alta")
 
         st.markdown("---")
@@ -714,9 +783,36 @@ def main():
         )
 
         g1, g2, g3, g4 = st.columns(4)
+
+        reducao_mediacao = resultado.y_basal - resultado.y_pos_mediacao
+        ajuste_adicional_m2 = resultado.y_pos_mediacao - resultado.y_final
+
         g1.metric("Pressão basal por X", f"{resultado.y_basal:.3f}")
-        g2.metric("Variação pela mediação", f"{resultado.reducao_mediada:+.3f}")
-        g3.metric("Ajuste final por M2", f"{resultado.ajuste_m2:+.3f}")
+
+        if abs(reducao_mediacao) < 0.001:
+            rotulo_mediacao = "Efeito da mediação"
+            valor_mediacao = "0.000"
+        elif reducao_mediacao > 0:
+            rotulo_mediacao = "Redução pela mediação"
+            valor_mediacao = f"{reducao_mediacao:.3f}"
+        else:
+            rotulo_mediacao = "Aumento pela mediação"
+            valor_mediacao = f"{abs(reducao_mediacao):.3f}"
+
+        g2.metric(rotulo_mediacao, valor_mediacao)
+
+        if abs(ajuste_adicional_m2) < 0.001:
+            rotulo_m2 = "Ajuste adicional por M2"
+            valor_m2 = "0.000"
+        elif ajuste_adicional_m2 > 0:
+            rotulo_m2 = "Redução adicional por M2"
+            valor_m2 = f"{ajuste_adicional_m2:.3f}"
+        else:
+            rotulo_m2 = "Aumento adicional por M2"
+            valor_m2 = f"{abs(ajuste_adicional_m2):.3f}"
+
+        g3.metric(rotulo_m2, valor_m2)
+
         g4.metric(
             "Escore final esperado",
             f"{resultado.y_final:.3f}" + (" ⚠️" if resultado.saturado else "")
