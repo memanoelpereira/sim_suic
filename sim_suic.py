@@ -852,8 +852,8 @@ def main():
     modo = st.sidebar.radio("Origem dos dados", ["Dados reais", "Modo simulação"])
     modo_pesquisador = st.sidebar.toggle(
         "Modo pesquisador",
-        value=True,
-        help="Ativado: mostra detalhes técnicos e metodológicos. Desativado: modo gestor, com interface mais enxuta."
+        value=False,
+        help="Ativado: mostra detalhes técnicos e metodológicos. Desativado: mostra interface mais simples."
     )
     modo_csv = modo == "Dados reais"
 
