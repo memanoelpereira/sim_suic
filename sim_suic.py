@@ -44,6 +44,7 @@ IND_ALTA = 0.024
 
 MOD_BAIXA = IND_BAIXA / IND_MEDIA
 MOD_ALTA = IND_ALTA / IND_MEDIA
+MOD_NEUTRA = 1.0
 
 # Médias populacionais
 V_POP = 1.51
@@ -141,6 +142,16 @@ def classificar_risco(y: float) -> str:
 
 def _sd_aprox_por_hdi(hdi_inf: float, hdi_sup: float) -> float:
     return (hdi_sup - hdi_inf) / (2 * 1.96)
+
+
+def obter_fator_pertenca_por_nivel(nivel: str) -> float:
+    if nivel == "sem_efeito":
+        return MOD_NEUTRA
+    if nivel == "baixa":
+        return MOD_BAIXA
+    if nivel == "alta":
+        return MOD_ALTA
+    return MOD_NEUTRA
 
 
 # =========================================================
@@ -289,7 +300,6 @@ def simular_incerteza_risco(
     rng = np.random.default_rng(seed)
 
     beta_xy_s = rng.normal(BETA_XY, _sd_aprox_por_hdi(*HDI_XY), n_sim)
-    beta_xm1_s = rng.normal(BETA_XM1, _sd_aprox_por_hdi(*HDI_XM1), n_sim)
     beta_m1m2_s = rng.normal(BETA_M1M2, _sd_aprox_por_hdi(*HDI_M1M2), n_sim)
     beta_m2y_s = rng.normal(BETA_M2Y, _sd_aprox_por_hdi(*HDI_M2Y), n_sim)
 
@@ -330,6 +340,63 @@ def simular_incerteza_risco(
             float(np.quantile(y_final_s, 0.975)),
         ),
         "cadeia_ativa": cadeia_ativa
+    }
+
+
+def calcular_cadeia_serial_explicitada(
+    x: float,
+    m1: float,
+    m2: float,
+    interceptos: Interceptos,
+    usar_m1: bool,
+    usar_m2: bool,
+    nivel_pertenca: str
+) -> dict:
+    """
+    Explicita três momentos da cadeia serial, em três cenários de pertença:
+    1) risco direto de X sobre Y
+    2) risco após o acolhimento ser propagado ao longo da cadeia
+    3) risco após acolhimento + satisfação
+
+    Regras:
+    - X sempre entra
+    - sem o efeito da pertença => mod = 1.00
+    - pertença baixa => mod = 0.80
+    - pertença alta  => mod = 1.20
+    - se M1=0 ou caminho desligado, não há propagação do acolhimento
+    - se M2=0 ou caminho desligado, não há mediação conjunta final
+    """
+    mod = obter_fator_pertenca_por_nivel(nivel_pertenca)
+
+    risco_direto = interceptos.ic_y + (BETA_XY * x)
+
+    # Etapa de acolhimento: mostramos M1 previsto por X.
+    m1_previsto = interceptos.ic_m1 + (BETA_XM1 * x)
+
+    # Propagação do acolhimento à satisfação prevista
+    if usar_m1 and (m1 > 0):
+        m2_via_acolhimento = mod * m1
+        risco_apos_acolhimento = risco_direto + (BETA_M2Y * m2_via_acolhimento)
+    else:
+        m2_via_acolhimento = 0.0
+        risco_apos_acolhimento = risco_direto
+
+    # Mediação conjunta de acolhimento + satisfação
+    cadeia_ativa = usar_m1 and usar_m2 and (m1 > 0) and (m2 > 0)
+    if cadeia_ativa:
+        risco_apos_cadeia_completa = risco_direto + (BETA_M2Y * m2)
+    else:
+        risco_apos_cadeia_completa = risco_direto
+
+    return {
+        "nivel_pertenca": nivel_pertenca,
+        "mod": mod,
+        "m1_previsto_por_x": float(np.clip(m1_previsto, 0.0, 5.0)),
+        "m2_via_acolhimento": float(np.clip(m2_via_acolhimento, 0.0, 5.0)),
+        "risco_direto": float(np.clip(risco_direto, 1.0, 5.0)),
+        "risco_apos_acolhimento": float(np.clip(risco_apos_acolhimento, 1.0, 5.0)),
+        "risco_apos_cadeia_completa": float(np.clip(risco_apos_cadeia_completa, 1.0, 5.0)),
+        "cadeia_ativa": cadeia_ativa,
     }
 
 
@@ -639,14 +706,6 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
                 f"com **aumento adicional de {abs(ajuste_adicional_m2):.3f} ponto(s)**."
             )
     else:
-        motivos = []
-        if not usar_m1:
-            motivos.append("o caminho X→M1→M2 foi desligado")
-        if not usar_m2:
-            motivos.append("o caminho M2→Y foi desligado")
-        if m1_zero := (r.m2_previsto_por_m1 == 0.0):
-            motivos.append("acolhimento e/ou satisfação foram zerados")
-
         texto.append(
             "A cadeia indireta foi anulada, de modo que **restou apenas o efeito direto de X sobre Y**."
         )
@@ -698,6 +757,7 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
 - M2 → Y: **[{HDI_M2Y[0]:.3f}, {HDI_M2Y[1]:.3f}]**
 
 **Moderação por pertença**
+- sem efeito: ×1.00
 - baixa: ×{MOD_BAIXA:.2f}
 - alta: ×{MOD_ALTA:.2f}
 
@@ -712,12 +772,63 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
 - Se **acolhimento = 0** e/ou **satisfação = 0**, o impacto indireto é anulado.
 - Nessa situação, o gráfico e as análises mostram apenas o **efeito direto**.
 
+**Leitura da cadeia serial explicitada**
+- 1. Direto: risco apenas sob X → Y
+- 2. Após acolhimento: risco após a propagação do acolhimento ao longo da cadeia
+- 3. Acolhimento + satisfação: risco após a mediação conjunta completa
+
 **Importante**
 - Este simulador oferece uma **tradução estrutural e didática** do modelo.
 - Quando o modo CSV calibra interceptos com médias do subgrupo, isso deve ser lido como **calibração local**, não como validação preditiva externa.
 - Escore final limitado ao intervalo Likert de **1 a 5**.
 - A faixa plausível do risco é uma **aproximação por simulação**, baseada nos HDIs dos coeficientes e não nos draws posteriores originais completos.
 """
+        )
+
+
+def exibir_bloco_cadeia_serial(x: float, m1: float, m2: float, inter: Interceptos, usar_m1: bool, usar_m2: bool, modo_pesquisador: bool):
+    st.markdown("---")
+    st.markdown("### Cadeia serial explicitada por cenário de pertença")
+
+    cenarios = [
+        ("Sem efeito da pertença", "sem_efeito"),
+        ("Pertença baixa", "baixa"),
+        ("Pertença alta", "alta"),
+    ]
+
+    cols = st.columns(3)
+
+    for col, (titulo, nivel) in zip(cols, cenarios):
+        res = calcular_cadeia_serial_explicitada(
+            x=x,
+            m1=m1,
+            m2=m2,
+            interceptos=inter,
+            usar_m1=usar_m1,
+            usar_m2=usar_m2,
+            nivel_pertenca=nivel
+        )
+        with col:
+            st.markdown(f"**{titulo}**")
+            st.metric("1. Direto (X→Y)", f"{res['risco_direto']:.3f}")
+            st.metric("2. Após acolhimento", f"{res['risco_apos_acolhimento']:.3f}")
+            st.metric("3. Acolhimento + satisfação", f"{res['risco_apos_cadeia_completa']:.3f}")
+
+            if modo_pesquisador:
+                st.caption(
+                    f"mod = {res['mod']:.2f} | "
+                    f"M1 previsto por X = {res['m1_previsto_por_x']:.3f} | "
+                    f"M2 via acolhimento = {res['m2_via_acolhimento']:.3f}"
+                )
+            else:
+                st.caption(f"mod = {res['mod']:.2f}")
+
+    if modo_pesquisador:
+        st.info(
+            "Nesta grade, o primeiro valor mostra apenas o efeito direto de X. "
+            "O segundo mostra a propagação do acolhimento ao longo da cadeia. "
+            "O terceiro mostra a etapa conjunta de acolhimento e satisfação. "
+            "O cenário neutro usa modulação 1.00; os cenários baixo e alto usam 0.80 e 1.20."
         )
 
 
@@ -739,10 +850,10 @@ def main():
 
     st.sidebar.header("⚙️ Configurações")
     modo = st.sidebar.radio("Origem dos dados", ["Dados reais", "Modo simulação"])
-    modo_exibicao = st.sidebar.toggle(
-        "Modo simples",
-        value=False,
-        help="Caso ativado, mostra detalhes técnicos e metodológicos. Destivado: mostra interface mais enxuta."
+    modo_pesquisador = st.sidebar.toggle(
+        "Modo pesquisador",
+        value=True,
+        help="Ativado: mostra detalhes técnicos e metodológicos. Desativado: modo gestor, com interface mais enxuta."
     )
     modo_csv = modo == "Dados reais"
 
@@ -759,7 +870,7 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🧠 Interpretação do modelo")
-    if modo_exibicao:
+    if modo_pesquisador:
         st.sidebar.caption("X entra sempre. Se M1=0 e/ou M2=0, o impacto indireto desaparece e resta apenas o efeito direto.")
     else:
         st.sidebar.caption("Modo gestor: exibe apenas informações essenciais para leitura rápida do cenário.")
@@ -866,7 +977,7 @@ def main():
 
             inter = interceptos_populacionais(pertenca == "Alta")
 
-        if modo_exibicao:
+        if modo_pesquisador:
             st.markdown("---")
             st.markdown("### Coeficientes estruturais")
             b1, b2 = st.columns(2)
@@ -957,7 +1068,17 @@ def main():
             f"{resultado.y_final:.3f}" + (" ⚠️" if resultado.saturado else "")
         )
 
-        if modo_exibicao:
+        exibir_bloco_cadeia_serial(
+            x=x,
+            m1=m1,
+            m2=m2,
+            inter=inter,
+            usar_m1=usar_m1,
+            usar_m2=usar_m2,
+            modo_pesquisador=modo_pesquisador
+        )
+
+        if modo_pesquisador:
             st.markdown("---")
             st.markdown("### Faixa plausível do risco estimado")
 
@@ -1011,7 +1132,7 @@ def main():
                     f"média reproduzida = **{resultado.y_final:.3f}** | erro = **{erro:.4f}**"
                 )
 
-        if modo_exibicao:
+        if modo_pesquisador:
             with st.expander("🔬 Diagrama estrutural do modelo", expanded=False):
                 st.plotly_chart(renderizar_diagrama_estrutural(), use_container_width=True)
 
