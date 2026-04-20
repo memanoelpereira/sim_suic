@@ -20,16 +20,22 @@ st.set_page_config(
 # =========================================================
 # PARÂMETROS DO MODELO
 # =========================================================
-# Estrutura serial:
-# X = Violência percebida
+# Estrutura:
+# X  = Violência percebida
 # M1 = Acolhimento escolar
 # M2 = Satisfação com a vida
-# Y = Ideação suicida
+# Y  = Ideação suicida
 
 BETA_XY = 0.243
 BETA_XM1 = -0.324
 BETA_M1M2 = 0.527
 BETA_M2Y = -0.170
+
+# HDIs 95% aproximados dos coeficientes
+HDI_XY = (0.167, 0.324)
+HDI_XM1 = (-0.369, -0.279)
+HDI_M1M2 = (0.462, 0.591)
+HDI_M2Y = (-0.247, -0.089)
 
 # Efeitos indiretos reportados por nível de pertença
 IND_BAIXA = 0.016
@@ -45,7 +51,7 @@ M1_POP = 3.56
 M2_POP = 3.38
 Y_POP = 1.69
 
-# Colunas mínimas esperadas no CSV
+# Colunas mínimas obrigatórias
 COLUNAS_MINIMAS = [
     "percepcao_violencia",
     "acolhimento",
@@ -54,19 +60,19 @@ COLUNAS_MINIMAS = [
     "ideacao_suicida",
 ]
 
-# Filtros opcionais exibidos se a coluna existir
+# Filtros opcionais
 FILTROS_CONFIG = {
     "sexo": "Sexo",
     "cor_da_pele": "Cor da pele",
     "orientação_sexual": "Orientação sexual",
     "renda": "Renda",
     "cidade": "Cidade",
-    "série": "Série",
+    "serie": "Série",
 }
 
 
 # =========================================================
-# ESTRUTURAS DE DADOS
+# ESTRUTURAS
 # =========================================================
 
 @dataclass
@@ -80,6 +86,9 @@ class Interceptos:
     m2_m: Optional[float] = None
     y_real: Optional[float] = None
     n: Optional[int] = None
+    pertenca_media_ref: Optional[float] = None
+    pertenca_dp_ref: Optional[float] = None
+    pertenca_z: Optional[float] = None
 
 
 @dataclass
@@ -96,23 +105,47 @@ class ResultadoSimulacao:
     efeito_indireto_x: float
     efeito_total_x: float
     saturado: bool
+    cadeia_ativa: bool
 
 
 # =========================================================
-# FUNÇÕES DE APOIO
+# FUNÇÕES BÁSICAS
 # =========================================================
 
 def beta_m1m2_efetivo(pertenca_alta: bool) -> float:
     return BETA_M1M2 * (MOD_ALTA if pertenca_alta else MOD_BAIXA)
 
 
-def inferir_pertenca_alta(valor_pertenca: float) -> bool:
+def inferir_pertenca_alta(valor_pertenca: float, media_ref: float, dp_ref: float) -> tuple[bool, float]:
     """
-    Regra simples e explícita.
-    Ajuste aqui se sua variável tiver outra codificação.
+    Classifica a pertença do subgrupo em relação à distribuição de referência.
+    Se z >= 0, trata como alta; se z < 0, trata como baixa.
     """
-    return valor_pertenca >= 3.0
+    if dp_ref <= 0 or np.isnan(dp_ref):
+        z = 0.0 if valor_pertenca == media_ref else (1.0 if valor_pertenca > media_ref else -1.0)
+        return valor_pertenca >= media_ref, z
 
+    z = (valor_pertenca - media_ref) / dp_ref
+    return z >= 0, z
+
+
+def classificar_risco(y: float) -> str:
+    if y < 2.0:
+        return "Faixa baixa"
+    elif y < 3.0:
+        return "Faixa moderada"
+    elif y < 4.0:
+        return "Faixa elevada"
+    return "Faixa muito elevada"
+
+
+def _sd_aprox_por_hdi(hdi_inf: float, hdi_sup: float) -> float:
+    return (hdi_sup - hdi_inf) / (2 * 1.96)
+
+
+# =========================================================
+# INTERCEPTOS
+# =========================================================
 
 def interceptos_populacionais(pertenca_alta: bool) -> Interceptos:
     beta_eff = beta_m1m2_efetivo(pertenca_alta)
@@ -134,14 +167,17 @@ def interceptos_populacionais(pertenca_alta: bool) -> Interceptos:
     )
 
 
-def calibrar_interceptos_subgrupo(df_sub: pd.DataFrame) -> Interceptos:
+def calibrar_interceptos_subgrupo(df_sub: pd.DataFrame, df_ref: pd.DataFrame) -> Interceptos:
     v_m = float(df_sub["percepcao_violencia"].mean())
     m1_m = float(df_sub["acolhimento"].mean())
     m2_m = float(df_sub["satisfacao_vida"].mean())
     p_m = float(df_sub["pertenca_grupal"].mean())
     y_m = float(df_sub["ideacao_suicida"].mean())
 
-    pertenca_alta = inferir_pertenca_alta(p_m)
+    p_ref_media = float(df_ref["pertenca_grupal"].mean())
+    p_ref_dp = float(df_ref["pertenca_grupal"].std())
+
+    pertenca_alta, p_z = inferir_pertenca_alta(p_m, p_ref_media, p_ref_dp)
     beta_eff = beta_m1m2_efetivo(pertenca_alta)
 
     ic_m1 = m1_m - BETA_XM1 * v_m
@@ -157,9 +193,16 @@ def calibrar_interceptos_subgrupo(df_sub: pd.DataFrame) -> Interceptos:
         m1_m=m1_m,
         m2_m=m2_m,
         y_real=y_m,
-        n=len(df_sub)
+        n=len(df_sub),
+        pertenca_media_ref=p_ref_media,
+        pertenca_dp_ref=p_ref_dp,
+        pertenca_z=p_z
     )
 
+
+# =========================================================
+# DADOS
+# =========================================================
 
 @st.cache_data
 def carregar_dados(caminho_csv: str) -> pd.DataFrame:
@@ -167,23 +210,15 @@ def carregar_dados(caminho_csv: str) -> pd.DataFrame:
 
     faltantes = [c for c in COLUNAS_MINIMAS if c not in df.columns]
     if faltantes:
-        raise ValueError(
-            f"Colunas obrigatórias ausentes no CSV: {', '.join(faltantes)}"
-        )
+        raise ValueError(f"Colunas obrigatórias ausentes no CSV: {', '.join(faltantes)}")
 
     df = df.dropna(subset=COLUNAS_MINIMAS).copy()
     return df
 
 
-def classificar_risco(y: float) -> str:
-    if y < 2.0:
-        return "Baixa intensidade estimada"
-    elif y < 3.0:
-        return "Intensidade moderada estimada"
-    elif y < 4.0:
-        return "Intensidade elevada estimada"
-    return "Intensidade muito elevada estimada"
-
+# =========================================================
+# MOTOR DO MODELO
+# =========================================================
 
 def calcular_resultado(
     x: float,
@@ -193,44 +228,34 @@ def calcular_resultado(
     usar_m1: bool,
     usar_m2: bool
 ) -> ResultadoSimulacao:
-    """
-    Lógica:
-    - X sempre entra.
-    - O caminho indireto pode ser ativado/desativado.
-    - M1 atua sobre M2 se usar_m1=True.
-    - M2 atua sobre Y se usar_m2=True.
-    """
     pertenca_alta = interceptos.pertenca_alta
     beta_eff = beta_m1m2_efetivo(pertenca_alta)
 
-    # Nó 1: X sempre presente, sem proteção mediada
-    y_basal = interceptos.ic_y + (BETA_XY * x) + (BETA_M2Y * interceptos.ic_m2)
+    # Nó basal: apenas efeito direto de X
+    y_basal = interceptos.ic_y + (BETA_XY * x)
 
-    # M2 previsto a partir de M1
-    if usar_m1:
-        m2_previsto = interceptos.ic_m2 + beta_eff * m1
-    else:
-        m2_previsto = interceptos.ic_m2
+    # Regra rígida:
+    # se M1=0 e/ou M2=0, some o impacto indireto.
+    # idem se o usuário desligar algum dos caminhos.
+    cadeia_ativa = usar_m1 and usar_m2 and (m1 > 0) and (m2 > 0)
 
-    # Nó 2: aplica M2 previsto via M1
-    if usar_m2:
-        y_pos_mediacao = interceptos.ic_y + (BETA_XY * x) + (BETA_M2Y * m2_previsto)
+    if cadeia_ativa:
+        m2_previsto = beta_eff * m1
+        y_pos_mediacao = y_basal + (BETA_M2Y * m2_previsto)
+        y_final_raw = y_basal + (BETA_M2Y * m2)
+        efeito_indireto_x = BETA_M2Y * beta_eff * BETA_XM1 * x
     else:
+        m2_previsto = 0.0
         y_pos_mediacao = y_basal
-
-    # Nó 3: usa o M2 informado
-    if usar_m2:
-        y_final_raw = interceptos.ic_y + (BETA_XY * x) + (BETA_M2Y * m2)
-    else:
         y_final_raw = y_basal
+        efeito_indireto_x = 0.0
 
     y_final = float(np.clip(y_final_raw, 1.0, 5.0))
-    saturado = (y_final != y_final_raw)
+    saturado = y_final != y_final_raw
 
     reducao_mediada = y_basal - y_pos_mediacao
     ajuste_m2 = y_pos_mediacao - y_final_raw
 
-    efeito_indireto_x = BETA_M2Y * beta_eff * BETA_XM1 * x if (usar_m1 and usar_m2) else 0.0
     efeito_direto_x = BETA_XY * x
     efeito_total_x = efeito_direto_x + efeito_indireto_x
 
@@ -240,17 +265,79 @@ def calcular_resultado(
         y_final=y_final,
         reducao_mediada=reducao_mediada,
         ajuste_m2=ajuste_m2,
-        m2_previsto_por_m1=float(np.clip(m2_previsto, 1.0, 5.0)),
+        m2_previsto_por_m1=float(np.clip(m2_previsto, 0.0, 5.0)),
         beta_m1m2_efetivo=beta_eff,
         fator_mod=(MOD_ALTA if pertenca_alta else MOD_BAIXA),
         efeito_direto_x=efeito_direto_x,
         efeito_indireto_x=efeito_indireto_x,
         efeito_total_x=efeito_total_x,
-        saturado=saturado
+        saturado=saturado,
+        cadeia_ativa=cadeia_ativa
     )
 
 
-def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bool) -> go.Figure:
+def simular_incerteza_risco(
+    x: float,
+    m1: float,
+    m2: float,
+    interceptos: Interceptos,
+    usar_m1: bool,
+    usar_m2: bool,
+    n_sim: int = 4000,
+    seed: int = 123
+) -> dict:
+    rng = np.random.default_rng(seed)
+
+    beta_xy_s = rng.normal(BETA_XY, _sd_aprox_por_hdi(*HDI_XY), n_sim)
+    beta_xm1_s = rng.normal(BETA_XM1, _sd_aprox_por_hdi(*HDI_XM1), n_sim)
+    beta_m1m2_s = rng.normal(BETA_M1M2, _sd_aprox_por_hdi(*HDI_M1M2), n_sim)
+    beta_m2y_s = rng.normal(BETA_M2Y, _sd_aprox_por_hdi(*HDI_M2Y), n_sim)
+
+    fator_mod = MOD_ALTA if interceptos.pertenca_alta else MOD_BAIXA
+    beta_m1m2_eff_s = beta_m1m2_s * fator_mod
+
+    ic_y = interceptos.ic_y
+
+    # Basal: apenas efeito direto
+    y_basal_s = ic_y + beta_xy_s * x
+
+    cadeia_ativa = usar_m1 and usar_m2 and (m1 > 0) and (m2 > 0)
+
+    if cadeia_ativa:
+        m2_prev_s = beta_m1m2_eff_s * m1
+        y_pos_s = ic_y + beta_xy_s * x + beta_m2y_s * m2_prev_s
+        y_final_raw_s = ic_y + beta_xy_s * x + beta_m2y_s * m2
+    else:
+        y_pos_s = y_basal_s.copy()
+        y_final_raw_s = y_basal_s.copy()
+
+    y_final_s = np.clip(y_final_raw_s, 1.0, 5.0)
+
+    return {
+        "y_basal_med": float(np.median(y_basal_s)),
+        "y_basal_hdi": (
+            float(np.quantile(y_basal_s, 0.025)),
+            float(np.quantile(y_basal_s, 0.975)),
+        ),
+        "y_pos_med": float(np.median(y_pos_s)),
+        "y_pos_hdi": (
+            float(np.quantile(y_pos_s, 0.025)),
+            float(np.quantile(y_pos_s, 0.975)),
+        ),
+        "y_final_med": float(np.median(y_final_s)),
+        "y_final_hdi": (
+            float(np.quantile(y_final_s, 0.025)),
+            float(np.quantile(y_final_s, 0.975)),
+        ),
+        "cadeia_ativa": cadeia_ativa
+    }
+
+
+# =========================================================
+# VISUALIZAÇÕES
+# =========================================================
+
+def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bool, incerteza: Optional[dict] = None) -> go.Figure:
     fig = go.Figure()
 
     x_labels = [
@@ -263,7 +350,6 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
     y2 = resultado.y_pos_mediacao
     y3 = resultado.y_final
 
-    # Faixas interpretativas
     fig.add_hrect(y0=1.0, y1=2.0, fillcolor="rgba(80,180,80,0.08)", line_width=0)
     fig.add_hrect(y0=2.0, y1=3.0, fillcolor="rgba(240,200,80,0.08)", line_width=0)
     fig.add_hrect(y0=3.0, y1=4.0, fillcolor="rgba(255,140,80,0.08)", line_width=0)
@@ -284,7 +370,6 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
         annotation_position="bottom left"
     )
 
-    # Guias horizontais
     fig.add_trace(go.Scatter(
         x=[x_labels[0], x_labels[1]],
         y=[y1, y1],
@@ -302,7 +387,6 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
         hoverinfo="skip"
     ))
 
-    # Mudança 1
     if abs(resultado.reducao_mediada) > 0.005:
         cor1 = "rgba(220,50,50,0.85)" if resultado.reducao_mediada > 0 else "rgba(50,90,220,0.85)"
         fig.add_trace(go.Scatter(
@@ -325,7 +409,6 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
             borderwidth=1,
         )
 
-    # Mudança 2
     if abs(resultado.ajuste_m2) > 0.005:
         cor2 = "rgba(220,50,50,0.85)" if resultado.ajuste_m2 > 0 else "rgba(50,90,220,0.85)"
         fig.add_trace(go.Scatter(
@@ -354,7 +437,28 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
         (x_labels[2], y3, "#2ca02c", "#175e17", "Escore final"),
     ]
 
+    error_map = {}
+    if incerteza is not None:
+        error_map = {
+            x_labels[0]: incerteza["y_basal_hdi"],
+            x_labels[1]: incerteza["y_pos_hdi"],
+            x_labels[2]: incerteza["y_final_hdi"],
+        }
+
     for xlab, yval, cor, borda, nome in pontos:
+        error_y = None
+        if xlab in error_map:
+            inf, sup = error_map[xlab]
+            error_y = dict(
+                type="data",
+                symmetric=False,
+                array=[max(sup - yval, 0)],
+                arrayminus=[max(yval - inf, 0)],
+                visible=True,
+                thickness=1.4,
+                width=4
+            )
+
         fig.add_trace(go.Scatter(
             x=[xlab],
             y=[yval],
@@ -363,13 +467,15 @@ def renderizar_cascata(resultado: ResultadoSimulacao, usar_m1: bool, usar_m2: bo
             text=[f"<b>{yval:.3f}</b>"],
             textposition="top center",
             textfont=dict(size=14, color=cor),
-            name=nome
+            name=nome,
+            error_y=error_y
         ))
 
     subtitulo = [
         "X sempre ativo",
         f"M1 {'ativo' if usar_m1 else 'desligado'}",
-        f"M2 {'ativo' if usar_m2 else 'desligado'}"
+        f"M2 {'ativo' if usar_m2 else 'desligado'}",
+        f"Cadeia {'ativa' if resultado.cadeia_ativa else 'anulada'}"
     ]
 
     fig.update_layout(
@@ -477,7 +583,11 @@ def renderizar_diagrama_estrutural() -> go.Figure:
     return fig
 
 
-def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bool, usar_m2: bool):
+# =========================================================
+# PAINEL TÉCNICO
+# =========================================================
+
+def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bool, usar_m2: bool, incerteza: Optional[dict] = None):
     st.markdown("### Painel Técnico")
 
     c1, c2, c3 = st.columns(3)
@@ -496,7 +606,7 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
         f"representando a pressão esperada quando **X entra diretamente no modelo**."
     )
 
-    if usar_m1 and usar_m2:
+    if r.cadeia_ativa:
         if abs(reducao_mediacao) < 0.001:
             texto.append(
                 f"A ativação do caminho mediado manteve o escore em **{r.y_pos_mediacao:.3f}**, "
@@ -528,45 +638,40 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
                 f"O uso do valor informado de M2 elevou adicionalmente o escore para **{r.y_final:.3f}**, "
                 f"com **aumento adicional de {abs(ajuste_adicional_m2):.3f} ponto(s)**."
             )
-
-    elif usar_m1 and not usar_m2:
-        if abs(reducao_mediacao) < 0.001:
-            texto.append(
-                "O caminho X→M1→M2 foi mantido como referência estrutural, mas sem efeito final sobre Y nesta configuração."
-            )
-        else:
-            texto.append(
-                "O caminho X→M1→M2 foi mantido como referência estrutural, "
-                "mas o efeito de M2 sobre Y foi desligado; por isso, a mediação não se completa no desfecho."
-            )
-
-    elif not usar_m1 and usar_m2:
-        if abs(ajuste_adicional_m2) < 0.001:
-            texto.append(
-                f"O efeito de M2 sobre Y foi mantido, mas o elo X→M1→M2 foi desligado. "
-                f"Nesta configuração, o escore final permaneceu em **{r.y_final:.3f}**, sem ajuste adicional relevante."
-            )
-        elif ajuste_adicional_m2 > 0:
-            texto.append(
-                f"O efeito de M2 sobre Y foi mantido, mas o elo X→M1→M2 foi desligado. "
-                f"Ainda assim, M2 produziu **redução adicional de {ajuste_adicional_m2:.3f} ponto(s)**, "
-                f"levando o escore final a **{r.y_final:.3f}**."
-            )
-        else:
-            texto.append(
-                f"O efeito de M2 sobre Y foi mantido, mas o elo X→M1→M2 foi desligado. "
-                f"Nesta configuração, M2 produziu **aumento adicional de {abs(ajuste_adicional_m2):.3f} ponto(s)**, "
-                f"levando o escore final a **{r.y_final:.3f}**."
-            )
-
     else:
+        motivos = []
+        if not usar_m1:
+            motivos.append("o caminho X→M1→M2 foi desligado")
+        if not usar_m2:
+            motivos.append("o caminho M2→Y foi desligado")
+        if m1_zero := (r.m2_previsto_por_m1 == 0.0):
+            motivos.append("acolhimento e/ou satisfação foram zerados")
+
         texto.append(
-            f"Os caminhos mediadores foram desligados, de modo que o escore final permaneceu em **{r.y_final:.3f}**, "
-            f"coincidindo com a pressão basal associada a X."
+            "A cadeia indireta foi anulada, de modo que **restou apenas o efeito direto de X sobre Y**."
+        )
+        texto.append(
+            f"Nesta configuração, o escore pós-mediação (**{r.y_pos_mediacao:.3f}**) e o escore final (**{r.y_final:.3f}**) "
+            f"coincidem com o nível basal."
+        )
+
+    if inter.pertenca_z is not None:
+        direcao = "acima" if inter.pertenca_z >= 0 else "abaixo"
+        texto.append(
+            f"A pertença média do subgrupo ficou **{direcao} da média da distribuição de referência**, "
+            f"com **z = {inter.pertenca_z:.3f}**, e por isso o cenário moderador foi tratado como "
+            f"**{'alta' if inter.pertenca_alta else 'baixa'} pertença**."
+        )
+
+    if incerteza is not None:
+        yf_inf, yf_sup = incerteza["y_final_hdi"]
+        texto.append(
+            f"Considerando a incerteza aproximada dos coeficientes, a **faixa plausível do escore final** ficou em "
+            f"**[{yf_inf:.3f}, {yf_sup:.3f}]** no HDI 95% aproximado."
         )
 
     texto.append(
-        f"A classificação heurística do escore final do risco é **{classificar_risco(r.y_final)}**."
+        f"A classificação heurística posiciona o escore final na **{classificar_risco(r.y_final).lower()}** da escala simulada."
     )
 
     st.info(" ".join(texto))
@@ -580,54 +685,71 @@ def exibir_painel_tecnico(inter: Interceptos, r: ResultadoSimulacao, usar_m1: bo
 - M2 = Satisfação com a vida
 - Y = Ideação suicida
 
-**Coeficientes**
+**Coeficientes centrais**
 - X → Y = **{BETA_XY:.3f}**
 - X → M1 = **{BETA_XM1:.3f}**
 - M1 → M2 = **{BETA_M1M2:.3f}**
 - M2 → Y = **{BETA_M2Y:.3f}**
 
+**HDIs 95% aproximados dos coeficientes**
+- X → Y: **[{HDI_XY[0]:.3f}, {HDI_XY[1]:.3f}]**
+- X → M1: **[{HDI_XM1[0]:.3f}, {HDI_XM1[1]:.3f}]**
+- M1 → M2: **[{HDI_M1M2[0]:.3f}, {HDI_M1M2[1]:.3f}]**
+- M2 → Y: **[{HDI_M2Y[0]:.3f}, {HDI_M2Y[1]:.3f}]**
+
 **Moderação por pertença**
 - baixa: ×{MOD_BAIXA:.2f}
 - alta: ×{MOD_ALTA:.2f}
 
+**Critério para classificar pertença no modo CSV**
+- A média de pertença do subgrupo é comparada à distribuição de referência do banco.
+- Calcula-se **z = (média_subgrupo - média_referência) / dp_referência**.
+- Se **z >= 0**, o subgrupo é tratado como **alta pertença**.
+- Se **z < 0**, o subgrupo é tratado como **baixa pertença**.
+
+**Regra do modo simulação**
+- X permanece sempre ativo.
+- Se **acolhimento = 0** e/ou **satisfação = 0**, o impacto indireto é anulado.
+- Nessa situação, o gráfico e as análises mostram apenas o **efeito direto**.
+
 **Importante**
 - Este simulador oferece uma **tradução estrutural e didática** do modelo.
 - Quando o modo CSV calibra interceptos com médias do subgrupo, isso deve ser lido como **calibração local**, não como validação preditiva externa.
-- X permanece sempre ativo; o que varia é a ativação dos caminhos mediadores.
 - Escore final limitado ao intervalo Likert de **1 a 5**.
+- A faixa plausível do risco é uma **aproximação por simulação**, baseada nos HDIs dos coeficientes e não nos draws posteriores originais completos.
 """
         )
 
 
 # =========================================================
-# INTERFACE PRINCIPAL
+# APP
 # =========================================================
 
 def main():
-    st.title("📊 Simulador do Risco de Ideação Suicida")
+    st.title("📊 Simulador Estrutural de Risco de Ideação")
     st.caption("Modelo serial moderado: X → M1 → M2 → Y, com X sempre presente.")
-    st.caption("Desenvolvido no  OPPES / PPGPSI/ UFS")
 
     if "mem_x" not in st.session_state:
         st.session_state.mem_x = int(round(V_POP))
-        st.session_state.mem_m1 = int(round(M1_POP))
-        st.session_state.mem_m2 = int(round(M2_POP))
+        st.session_state.mem_m1 = max(0, int(round(M1_POP)))
+        st.session_state.mem_m2 = max(0, int(round(M2_POP)))
         st.session_state.mem_pert = "Alta"
         st.session_state.interceptos_cache = interceptos_populacionais(True)
         st.session_state.ultimo_modo = "Modo simulação"
 
-    # Sidebar
     st.sidebar.header("⚙️ Configurações")
-    modo = st.sidebar.radio(
-        "Origem dos dados",
-        ["Dados reais", "Modo simulação"]
+    modo = st.sidebar.radio("Origem dos dados", ["Dados reais", "Modo simulação"])
+    modo_exibicao = st.sidebar.toggle(
+        "Modo simples",
+        value=False,
+        help="Caso ativado, mostra detalhes técnicos e metodológicos. Destivado: mostra interface mais enxuta."
     )
-    modo_csv = (modo == "Dados reais")
+    modo_csv = modo == "Dados reais"
 
     if modo == "Modo simulação" and st.session_state.ultimo_modo == "Dados reais":
-        st.session_state.slider_x = st.session_state.mem_x
-        st.session_state.slider_m1 = st.session_state.mem_m1
-        st.session_state.slider_m2 = st.session_state.mem_m2
+        st.session_state.slider_x = min(5, max(1, st.session_state.mem_x))
+        st.session_state.slider_m1 = min(5, max(0, st.session_state.mem_m1))
+        st.session_state.slider_m2 = min(5, max(0, st.session_state.mem_m2))
         st.session_state.radio_pert = st.session_state.mem_pert
 
     st.session_state.ultimo_modo = modo
@@ -637,7 +759,10 @@ def main():
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🧠 Interpretação do modelo")
-    st.sidebar.caption("X entra sempre. M1 e M2 podem ser ligados/desligados como caminhos de proteção/ajuste.")
+    if modo_exibicao:
+        st.sidebar.caption("X entra sempre. Se M1=0 e/ou M2=0, o impacto indireto desaparece e resta apenas o efeito direto.")
+    else:
+        st.sidebar.caption("Modo gestor: exibe apenas informações essenciais para leitura rápida do cenário.")
 
     inter = interceptos_populacionais(True)
     y_real = None
@@ -677,32 +802,30 @@ def main():
             st.warning("Nenhum caso corresponde ao filtro selecionado.")
             st.stop()
 
-        inter = calibrar_interceptos_subgrupo(df_f)
+        inter = calibrar_interceptos_subgrupo(df_f, df)
         y_real = inter.y_real
 
         x = inter.v_m
         m1 = inter.m1_m
         m2 = inter.m2_m
-        pertenca_alta = inter.pertenca_alta
 
         st.session_state.mem_x = int(round(x))
-        st.session_state.mem_m1 = int(round(m1))
-        st.session_state.mem_m2 = int(round(m2))
-        st.session_state.mem_pert = "Alta" if pertenca_alta else "Baixa"
+        st.session_state.mem_m1 = max(0, int(round(m1)))
+        st.session_state.mem_m2 = max(0, int(round(m2)))
+        st.session_state.mem_pert = "Alta" if inter.pertenca_alta else "Baixa"
         st.session_state.interceptos_cache = inter
 
     else:
-        st.sidebar.success(
-            "💡 Use os controles para inspecionar cenários com X sempre ativo e com os mediadores ligados ou desligados."
-        )
+        st.sidebar.success("💡 Em M1 e M2, o valor 0 anula o impacto indireto correspondente e o gráfico colapsa para o efeito direto.")
 
-        x = st.session_state.get("slider_x", st.session_state.mem_x)
-        m1 = st.session_state.get("slider_m1", st.session_state.mem_m1)
-        m2 = st.session_state.get("slider_m2", st.session_state.mem_m2)
-        pertenca_escolha = st.session_state.get("radio_pert", st.session_state.mem_pert)
-        pertenca_alta = (pertenca_escolha == "Alta")
-
-        inter = interceptos_populacionais(pertenca_alta)
+        if "slider_x" not in st.session_state:
+            st.session_state.slider_x = min(5, max(1, st.session_state.mem_x))
+        if "slider_m1" not in st.session_state:
+            st.session_state.slider_m1 = min(5, max(0, st.session_state.mem_m1))
+        if "slider_m2" not in st.session_state:
+            st.session_state.slider_m2 = min(5, max(0, st.session_state.mem_m2))
+        if "radio_pert" not in st.session_state:
+            st.session_state.radio_pert = st.session_state.mem_pert
 
     col_esq, col_dir = st.columns([1, 2.2], gap="large")
 
@@ -714,6 +837,14 @@ def main():
             st.metric("Satisfação com a vida (M2)", f"{m2:.2f}")
             st.write(f"**Pertença:** {'Alta' if inter.pertenca_alta else 'Baixa'}")
 
+            if inter.pertenca_media_ref is not None and inter.pertenca_dp_ref is not None and inter.pertenca_z is not None:
+                st.caption(
+                    f"Pertença do subgrupo: média = **{float(df_f['pertenca_grupal'].mean()):.3f}** | "
+                    f"referência = **{inter.pertenca_media_ref:.3f}** | "
+                    f"DP ref. = **{inter.pertenca_dp_ref:.3f}** | "
+                    f"z = **{inter.pertenca_z:.3f}**"
+                )
+
             m1_prev = inter.ic_m1 + BETA_XM1 * x
             st.caption(f"M1 previsto pelo caminho X→M1: **{np.clip(m1_prev, 1, 5):.2f}**")
             st.caption(
@@ -721,23 +852,12 @@ def main():
                 f"({'acima' if m1 > m1_prev else 'abaixo' if m1 < m1_prev else 'igual ao'} previsto estruturalmente)"
             )
         else:
-            st.subheader("Simulação em escala Likert")
-            if "slider_x" not in st.session_state:
-                st.session_state.slider_x = int(x)
-
-            if "slider_m1" not in st.session_state:
-                st.session_state.slider_m1 = int(m1)
-
-            if "slider_m2" not in st.session_state:
-                st.session_state.slider_m2 = int(m2)
-
-            if "radio_pert" not in st.session_state:
-                st.session_state.radio_pert = "Alta" if inter.pertenca_alta else "Baixa"
-
+            st.subheader("Simulação em escala ajustada")
             st.slider("Violência percebida (X)", 1, 5, key="slider_x")
-            st.slider("Acolhimento (M1)", 1, 5, key="slider_m1")
-            st.slider("Satisfação com a vida (M2)", 1, 5, key="slider_m2")
+            st.slider("Acolhimento (M1)", 0, 5, key="slider_m1")
+            st.slider("Satisfação com a vida (M2)", 0, 5, key="slider_m2")
             st.radio("Pertença grupal", ["Baixa", "Alta"], key="radio_pert")
+            st.caption("Em M1 e M2, o valor 0 anula o impacto indireto. Com M1=0 e/ou M2=0, restam apenas os efeitos diretos.")
 
             x = st.session_state.slider_x
             m1 = st.session_state.slider_m1
@@ -746,26 +866,34 @@ def main():
 
             inter = interceptos_populacionais(pertenca == "Alta")
 
-        st.markdown("---")
-        st.markdown("### Coeficientes estruturais")
-        b1, b2 = st.columns(2)
-        with b1:
-            st.metric("X → M1", f"{BETA_XM1:.3f}")
-            st.metric("M1 → M2", f"{BETA_M1M2:.3f} × mod")
-            st.metric("X → Y", f"{BETA_XY:.3f}")
-        with b2:
-            st.metric("M2 → Y", f"{BETA_M2Y:.3f}")
-            st.metric("Fator de moderação", f"×{MOD_ALTA if inter.pertenca_alta else MOD_BAIXA:.2f}")
-            st.metric(
-                "Indireto de referência",
-                f"{IND_ALTA if inter.pertenca_alta else IND_BAIXA:.3f}"
-            )
+        if modo_exibicao:
+            st.markdown("---")
+            st.markdown("### Coeficientes estruturais")
+            b1, b2 = st.columns(2)
 
-        st.markdown("---")
-        st.markdown("### Estado dos caminhos")
-        st.write(f"- X direto em Y: **ativo**")
-        st.write(f"- X→M1→M2: **{'ativo' if usar_m1 else 'desligado'}**")
-        st.write(f"- M2→Y: **{'ativo' if usar_m2 else 'desligado'}**")
+            with b1:
+                st.metric("X → M1", f"{BETA_XM1:.3f}")
+                st.metric("M1 → M2", f"{BETA_M1M2:.3f} × mod")
+                st.metric("X → Y", f"{BETA_XY:.3f}")
+
+            with b2:
+                st.metric("M2 → Y", f"{BETA_M2Y:.3f}")
+                st.metric("Fator de moderação", f"×{MOD_ALTA if inter.pertenca_alta else MOD_BAIXA:.2f}")
+                st.metric("Indireto de referência", f"{IND_ALTA if inter.pertenca_alta else IND_BAIXA:.3f}")
+
+            st.markdown("---")
+            st.markdown("### Estado dos caminhos")
+            st.write("- X direto em Y: **ativo**")
+            st.write(f"- X→M1→M2: **{'ativo' if usar_m1 else 'desligado'}**")
+            st.write(f"- M2→Y: **{'ativo' if usar_m2 else 'desligado'}**")
+            st.write(f"- Cadeia indireta: **{'ativa' if (usar_m1 and usar_m2 and m1 > 0 and m2 > 0) else 'anulada'}**")
+        else:
+            st.markdown("---")
+            st.markdown("### Leitura operacional")
+            st.write(f"- Violência (X): **{x:.2f}**")
+            st.write(f"- Acolhimento (M1): **{m1:.2f}**")
+            st.write(f"- Satisfação (M2): **{m2:.2f}**")
+            st.write(f"- Cadeia indireta: **{'ativa' if (usar_m1 and usar_m2 and m1 > 0 and m2 > 0) else 'anulada'}**")
 
     resultado = calcular_resultado(
         x=x,
@@ -776,9 +904,20 @@ def main():
         usar_m2=usar_m2
     )
 
+    incerteza = simular_incerteza_risco(
+        x=x,
+        m1=m1,
+        m2=m2,
+        interceptos=inter,
+        usar_m1=usar_m1,
+        usar_m2=usar_m2,
+        n_sim=4000,
+        seed=123
+    )
+
     with col_dir:
         st.plotly_chart(
-            renderizar_cascata(resultado, usar_m1, usar_m2),
+            renderizar_cascata(resultado, usar_m1, usar_m2, incerteza=incerteza),
             use_container_width=True
         )
 
@@ -818,12 +957,46 @@ def main():
             f"{resultado.y_final:.3f}" + (" ⚠️" if resultado.saturado else "")
         )
 
-        st.markdown("---")
-        st.markdown("### Leitura substantiva")
-        s1, s2, s3 = st.columns(3)
-        s1.metric("M2 previsto a partir de M1", f"{resultado.m2_previsto_por_m1:.3f}")
-        s2.metric("Classificação heurística", classificar_risco(resultado.y_final))
-        s3.metric("β M1→M2 efetivo", f"{resultado.beta_m1m2_efetivo:.3f}")
+        if modo_exibicao:
+            st.markdown("---")
+            st.markdown("### Faixa plausível do risco estimado")
+
+            h1, h2, h3 = st.columns(3)
+
+            yb_inf, yb_sup = incerteza["y_basal_hdi"]
+            yp_inf, yp_sup = incerteza["y_pos_hdi"]
+            yf_inf, yf_sup = incerteza["y_final_hdi"]
+
+            with h1:
+                st.metric("Basal: mediana simulada", f"{incerteza['y_basal_med']:.3f}")
+                st.caption(f"HDI 95% aprox.: [{yb_inf:.3f}, {yb_sup:.3f}]")
+
+            with h2:
+                st.metric("Pós-mediação: mediana simulada", f"{incerteza['y_pos_med']:.3f}")
+                st.caption(f"HDI 95% aprox.: [{yp_inf:.3f}, {yp_sup:.3f}]")
+
+            with h3:
+                st.metric("Final: mediana simulada", f"{incerteza['y_final_med']:.3f}")
+                st.caption(f"HDI 95% aprox.: [{yf_inf:.3f}, {yf_sup:.3f}]")
+
+            st.info(
+                f"Faixa plausível do escore final (HDI 95% aproximado): **[{yf_inf:.3f}, {yf_sup:.3f}]** "
+                f"| mediana simulada: **{incerteza['y_final_med']:.3f}**"
+            )
+
+            st.markdown("---")
+            st.markdown("### Leitura substantiva")
+
+            s1, s2, s3 = st.columns(3)
+            s1.metric("M2 previsto a partir de M1", f"{resultado.m2_previsto_por_m1:.3f}")
+            s2.metric("Faixa da escala simulada", classificar_risco(resultado.y_final))
+            s3.metric("β M1→M2 efetivo", f"{resultado.beta_m1m2_efetivo:.3f}")
+        else:
+            st.markdown("---")
+            st.markdown("### Resumo executivo")
+            s1, s2 = st.columns(2)
+            s1.metric("Faixa da escala simulada", classificar_risco(resultado.y_final))
+            s2.metric("Cadeia indireta", "Ativa" if resultado.cadeia_ativa else "Anulada")
 
         if modo_csv and y_real is not None:
             erro = abs(resultado.y_final - y_real)
@@ -838,10 +1011,24 @@ def main():
                     f"média reproduzida = **{resultado.y_final:.3f}** | erro = **{erro:.4f}**"
                 )
 
-        with st.expander("🔬 Diagrama estrutural do modelo", expanded=False):
-            st.plotly_chart(renderizar_diagrama_estrutural(), use_container_width=True)
+        if modo_exibicao:
+            with st.expander("🔬 Diagrama estrutural do modelo", expanded=False):
+                st.plotly_chart(renderizar_diagrama_estrutural(), use_container_width=True)
 
-        exibir_painel_tecnico(inter, resultado, usar_m1, usar_m2)
+            exibir_painel_tecnico(inter, resultado, usar_m1, usar_m2, incerteza=incerteza)
+        else:
+            with st.expander("Resumo gerencial", expanded=True):
+                if resultado.cadeia_ativa:
+                    st.write(
+                        "O cenário atual indica que acolhimento e satisfação estão contribuindo para modificar o risco final. "
+                        "O valor exibido já incorpora esses efeitos indiretos."
+                    )
+                else:
+                    st.write(
+                        "Neste cenário, os efeitos indiretos estão anulados. O risco final reflete apenas o efeito direto da violência."
+                    )
+                st.write(f"**Escore final esperado:** {resultado.y_final:.3f}")
+                st.write(f"**Classificação na escala simulada:** {classificar_risco(resultado.y_final)}")
 
 
 if __name__ == "__main__":
