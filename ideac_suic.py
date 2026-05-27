@@ -876,7 +876,7 @@ def exibir_bloco_cadeia_serial(x: float, inter: Interceptos, usar_m1: bool, usar
 
 def main():
     st.title("📊 Simulador Estrutural de Risco de Ideação")
-    st.caption("Marcos Emanoel Pereira & Marcus Eugênio Oliveira Lima - OPPES/PPGPSI UFS")
+    st.caption("Simulador de Ideação")
 
     if "mem_x" not in st.session_state:
         st.session_state.mem_x = 1
